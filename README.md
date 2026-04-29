@@ -1,5 +1,11 @@
 # Light Pyrefly
 
+<p align="center">
+  <img src="icon.png" width="128" alt="Light Pyrefly Logo">
+</p>
+
+[Visit Publisher Page](https://marketplace.visualstudio.com/manage/publishers/mustapha)
+
 Light Pyrefly is a lightweight Python semantic highlighting extension for Visual Studio Code. It provides beautiful, context-aware syntax coloring without the overhead of a full type checker or LSP server.
 
 ## Features
