@@ -1,0 +1,48 @@
+name: Auto-Build and Package
+
+on:
+  push:
+    branches:
+      - main
+    # Prevent infinite loops if the bot is the only one pushing
+    paths-ignore:
+      - '*.vsix'
+      - 'package.json'
+      - 'package-lock.json'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Needed to push commits back to the repo
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 18
+
+      - name: Configure Git
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Install dependencies
+        run: npm install
+
+      - name: Compile TypeScript
+        run: npm run compile
+
+      - name: Bump Version Number
+        run: npm version patch --no-git-tag-version
+
+      - name: Package VSIX
+        run: npm run package
+
+      - name: Commit and Push
+        run: |
+          git add package.json package-lock.json *.vsix
+          git commit -m "Auto-compile and bump version [skip ci]" || echo "No changes"
+          git push

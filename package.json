@@ -1,0 +1,65 @@
+{
+    "name": "light-pyrefly",
+    "displayName": "Light Pyrefly — Python Semantic Highlighting",
+    "description": "Lightweight Python semantic highlighting. No type checker, no LSP server — just beautiful, context-aware syntax coloring.",
+    "version": "1.0.0",
+    "icon": "icon.png",
+    "publisher": "mustapha",
+    "repository": "https://github.com/local/local",
+    "license": "MIT",
+    "engines": {
+        "vscode": "^1.75.0"
+    },
+    "categories": [
+        "Programming Languages"
+    ],
+    "activationEvents": [
+        "onLanguage:python"
+    ],
+    "main": "./out/extension.js",
+    "contributes": {
+        "semanticTokenScopes": [
+            {
+                "language": "python",
+                "scopes": {
+                    "variable.readonly": [
+                        "variable.other.constant.python"
+                    ],
+                    "parameter.selfParameter": [
+                        "variable.language.self.python"
+                    ]
+                }
+            }
+        ],
+        "configurationDefaults": {
+            "editor.semanticHighlighting.enabled": true,
+            "editor.semanticTokenColorCustomizations": {
+                "rules": {
+                    "variable.readonly:python": "#4EC9B0",
+                    "parameter.selfParameter:python": "#569CD6",
+                    "decorator:python": "#DCDCAA",
+                    "typeParameter:python": "#4FC1FF"
+                }
+            }
+        },
+        "configuration": {
+            "title": "Light Pyrefly",
+            "properties": {
+                "lightPyrefly.enabled": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Enable or disable Light Pyrefly semantic highlighting."
+                }
+            }
+        }
+    },
+    "scripts": {
+        "compile": "tsc -p ./",
+        "watch": "tsc -watch -p ./",
+        "package": "npx -y @vscode/vsce package --no-dependencies"
+    },
+    "devDependencies": {
+        "@types/vscode": "^1.75.0",
+        "typescript": "^5.0.0"
+    }
+}
