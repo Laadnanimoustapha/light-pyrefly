@@ -1,7 +1,7 @@
 import os
 import secrets
 import string
-from typing import List, Optional, Dict, Any
+from typing import List, Optional, Dict, Any 
 
 # Generic constants for testing semantic highlighting
 DEFAULT_LIMIT = 100

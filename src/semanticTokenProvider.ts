@@ -92,10 +92,36 @@ export class PythonSemanticTokensProvider
         // Reset scopes for pass 2
         scopes.length = 0;
 
+        const allTokens: { line: number, char: number, length: number, type: number, mod: number }[] = [];
+        const fakeBuilder = {
+            push: (lineIdx: number, char: number, length: number, type: number, mod: number) => {
+                allTokens.push({ line: lineIdx, char, length, type, mod });
+            }
+        };
+
         // Pass 2: emit tokens
         for (let i = 0; i < document.lineCount; i++) {
             const line = document.lineAt(i).text;
-            this.tokenizeLine(line, i, builder, scopes, importedNames, definedNames);
+            this.tokenizeLine(line, i, fakeBuilder as any, scopes, importedNames, definedNames);
+        }
+
+        // Sort tokens to avoid out-of-order pushing errors
+        allTokens.sort((a, b) => {
+            if (a.line !== b.line) return a.line - b.line;
+            return a.char - b.char;
+        });
+
+        let lastLine = -1;
+        let lastChar = -1;
+        for (const t of allTokens) {
+            if (t.line !== lastLine) {
+                lastLine = t.line;
+                lastChar = -1;
+            }
+            if (t.char >= lastChar) {
+                builder.push(t.line, t.char, t.length, t.type, t.mod);
+                lastChar = t.char + t.length;
+            }
         }
 
         return builder.build();
@@ -128,7 +154,11 @@ export class PythonSemanticTokensProvider
                 if (BUILTIN_TYPES.has(local) || TYPING_NAMES.has(local)) {
                     importedNames.set(local, "class");
                 } else {
-                    importedNames.set(local, "namespace");
+                    let type = "namespace";
+                    if (RE_ALL_CAPS.test(local)) type = "constant";
+                    else if (/^[A-Z]/.test(local)) type = "class";
+                    else type = "function";
+                    importedNames.set(local, type);
                 }
             }
         } else if ((m = line.match(RE_IMPORT))) {
@@ -159,16 +189,9 @@ export class PythonSemanticTokensProvider
 
         let m: RegExpMatchArray | null;
 
-        // ── Comments ───────────────────────────────────────────────
-        if ((m = line.match(RE_COMMENT))) {
-            builder.push(lineIdx, m[1].length, line.length - m[1].length, idx("comment"), 0);
-            return;
-        }
-
         // ── Decorators ─────────────────────────────────────────────
         if ((m = line.match(RE_DECORATOR))) {
             builder.push(lineIdx, m[1].length, 1 + m[2].length, idx("decorator"), 0);
-            return;
         }
 
         // ── Class definition ───────────────────────────────────────
@@ -178,7 +201,6 @@ export class PythonSemanticTokensProvider
             scopes.push({ indent, kind: "class" });
             // Base classes after the name
             this.highlightTypeRefs(line, lineIdx, nameStart + m[2].length, builder, importedNames, definedNames);
-            return;
         }
 
         // ── Function/method definition ─────────────────────────────
@@ -215,7 +237,6 @@ export class PythonSemanticTokensProvider
                 const arrowIdx = line.lastIndexOf("->");
                 this.highlightTypeRefs(line, lineIdx, arrowIdx + 2, builder, importedNames, definedNames);
             }
-            return;
         }
 
         // ── from X import Y ────────────────────────────────────────
@@ -239,7 +260,6 @@ export class PythonSemanticTokensProvider
                     if (localOff >= 0) builder.push(lineIdx, localOff, localName.length, idx(tType), 0);
                 }
             }
-            return;
         }
 
         // ── import X ───────────────────────────────────────────────
@@ -252,7 +272,6 @@ export class PythonSemanticTokensProvider
                 const off = line.indexOf(trimmed, startOff);
                 if (off >= 0) builder.push(lineIdx, off, trimmed.length, idx("namespace"), 0);
             }
-            return;
         }
 
         // ── except ... as name ─────────────────────────────────────
@@ -378,45 +397,109 @@ export class PythonSemanticTokensProvider
         importedNames: Map<string, string>, definedNames: Map<string, string>,
         _inClass: boolean
     ) {
-        // Find function-call patterns: name(
-        const callRe = /\b([A-Za-z_]\w*)\s*\(/g;
+        // To avoid out-of-order pushing if builder doesn't sort, we collect tokens and sort them
+        const tokensToPush: { char: number, length: number, type: number, mod: number }[] = [];
+
+        const idRe = /\b([A-Za-z_]\w*)\b/g;
         let m: RegExpExecArray | null;
-        while ((m = callRe.exec(line))) {
+        
+        const keywords = new Set([
+            "False", "None", "True", "and", "as", "assert", "async", "await", "break", 
+            "class", "continue", "def", "del", "elif", "else", "except", "finally", 
+            "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal", 
+            "not", "or", "pass", "raise", "return", "try", "while", "with", "yield",
+            "match", "case", "type"
+        ]);
+
+        // Find string boundaries to avoid highlighting words inside strings, and highlight inline comments
+        const stringRanges: [number, number][] = [];
+        let inString = false;
+        let stringChar = '';
+        for (let i = 0; i < line.length; i++) {
+            if (!inString) {
+                if (line[i] === '"' || line[i] === "'") {
+                    inString = true;
+                    stringChar = line[i];
+                    stringRanges.push([i, -1]);
+                } else if (line[i] === '#') {
+                    stringRanges.push([i, line.length]);
+                    tokensToPush.push({ char: i, length: line.length - i, type: idx("comment"), mod: 0 });
+                    break;
+                }
+            } else {
+                if (line[i] === '\\') { i++; continue; }
+                if (line[i] === stringChar) {
+                    inString = false;
+                    stringRanges[stringRanges.length - 1][1] = i;
+                }
+            }
+        }
+        if (inString) stringRanges[stringRanges.length - 1][1] = line.length;
+
+        while ((m = idRe.exec(line))) {
             const name = m[1];
             const off = m.index;
-            if (["def", "class", "if", "elif", "while", "for", "with", "except",
-                 "return", "yield", "assert", "import", "from", "raise", "del",
-                 "not", "and", "or", "in", "is", "lambda", "as", "pass",
-                 "break", "continue", "try", "finally", "global", "nonlocal",
-                 "async", "await", "match", "case", "type"].includes(name)) continue;
-            if (BUILTIN_FUNCTIONS.has(name)) {
-                builder.push(lineIdx, off, name.length, idx("function"), mod("defaultLibrary"));
-            } else if (BUILTIN_TYPES.has(name)) {
-                builder.push(lineIdx, off, name.length, idx("class"), mod("defaultLibrary"));
-            } else if (definedNames.get(name) === "class") {
-                builder.push(lineIdx, off, name.length, idx("class"), 0);
-            } else if (definedNames.has(name)) {
-                const t = definedNames.get(name)!;
-                builder.push(lineIdx, off, name.length, idx(t === "constant" ? "function" : t), 0);
-            } else if (importedNames.has(name)) {
-                builder.push(lineIdx, off, name.length, idx(importedNames.get(name)!), 0);
+            
+            if (keywords.has(name)) continue;
+
+            const inStr = stringRanges.some(([s, e]) => off >= s && off <= e);
+            if (inStr) continue;
+
+            const isAttr = off > 0 && line[off - 1] === ".";
+            const afterWord = line.substring(off + name.length).trimStart();
+            const isCall = afterWord.startsWith("(");
+            const isKwarg = afterWord.startsWith("=");
+
+            if (isAttr) {
+                if (isCall) {
+                    tokensToPush.push({ char: off, length: name.length, type: idx("method"), mod: 0 });
+                } else if (RE_ALL_CAPS.test(name)) {
+                    tokensToPush.push({ char: off, length: name.length, type: idx("enumMember"), mod: 0 });
+                } else {
+                    tokensToPush.push({ char: off, length: name.length, type: idx("property"), mod: 0 });
+                }
+            } else if (isCall) {
+                if (BUILTIN_FUNCTIONS.has(name)) {
+                    tokensToPush.push({ char: off, length: name.length, type: idx("function"), mod: mod("defaultLibrary") });
+                } else if (BUILTIN_TYPES.has(name)) {
+                    tokensToPush.push({ char: off, length: name.length, type: idx("class"), mod: mod("defaultLibrary") });
+                } else if (definedNames.get(name) === "class") {
+                    tokensToPush.push({ char: off, length: name.length, type: idx("class"), mod: 0 });
+                } else if (definedNames.has(name)) {
+                    const t = definedNames.get(name)!;
+                    tokensToPush.push({ char: off, length: name.length, type: idx(t === "constant" ? "function" : t), mod: 0 });
+                } else if (importedNames.has(name)) {
+                    tokensToPush.push({ char: off, length: name.length, type: idx(importedNames.get(name)!), mod: 0 });
+                } else {
+                    tokensToPush.push({ char: off, length: name.length, type: idx("function"), mod: 0 });
+                }
+            } else if (isKwarg) {
+                // Highlight kwargs like 'status_code=' as parameters
+                tokensToPush.push({ char: off, length: name.length, type: idx("parameter"), mod: 0 });
+            } else {
+                if (BUILTIN_TYPES.has(name) || TYPING_NAMES.has(name)) {
+                    tokensToPush.push({ char: off, length: name.length, type: idx("class"), mod: mod("defaultLibrary") });
+                } else if (definedNames.get(name) === "class") {
+                    tokensToPush.push({ char: off, length: name.length, type: idx("class"), mod: 0 });
+                } else if (definedNames.has(name)) {
+                    const t = definedNames.get(name)!;
+                    tokensToPush.push({ char: off, length: name.length, type: idx(t === "constant" ? "variable" : t), mod: t === "constant" ? mod("readonly") : 0 });
+                } else if (importedNames.has(name)) {
+                    tokensToPush.push({ char: off, length: name.length, type: idx(importedNames.get(name)!), mod: 0 });
+                } else if (RE_ALL_CAPS.test(name)) {
+                    tokensToPush.push({ char: off, length: name.length, type: idx("variable"), mod: mod("readonly") });
+                } else {
+                    tokensToPush.push({ char: off, length: name.length, type: idx("variable"), mod: 0 });
+                }
             }
         }
 
-        // Attribute access: .name
-        const attrRe = /\.([A-Za-z_]\w*)/g;
-        while ((m = attrRe.exec(line))) {
-            const name = m[1];
-            const off = m.index + 1; // skip the dot
-            // Check if followed by ( → method/function call
-            const afterAttr = line.substring(off + name.length).trimStart();
-            if (afterAttr.startsWith("(")) {
-                builder.push(lineIdx, off, name.length, idx("method"), 0);
-            } else if (RE_ALL_CAPS.test(name)) {
-                builder.push(lineIdx, off, name.length, idx("enumMember"), 0);
-            } else {
-                builder.push(lineIdx, off, name.length, idx("property"), 0);
-            }
+        // Push sorted tokens (they are already sorted by off since regex scans left-to-right)
+        for (const t of tokensToPush) {
+            // we catch errors in case of overlapping tokens pushed in pass 1 vs pass 2
+            try {
+                builder.push(lineIdx, t.char, t.length, t.type, t.mod);
+            } catch (e) { /* ignore out of order / overlap */ }
         }
     }
 

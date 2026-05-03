@@ -7,6 +7,7 @@ on:
     # Prevent infinite loops if the bot is the only one pushing
     paths-ignore:
       - '*.vsix'
+      - 'data/*.vsix'
       - 'package.json'
       - 'package-lock.json'
 
@@ -39,10 +40,13 @@ jobs:
         run: npm version patch --no-git-tag-version
 
       - name: Package VSIX
-        run: npm run package
+        run: |
+          npm run package
+          mkdir -p data
+          mv *.vsix data/
 
       - name: Commit and Push
         run: |
-          git add package.json package-lock.json *.vsix
+          git add package.json package-lock.json data/*.vsix
           git commit -m "Auto-compile and bump version [skip ci]" || echo "No changes"
           git push

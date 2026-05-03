@@ -27,6 +27,16 @@
                     ],
                     "parameter.selfParameter": [
                         "variable.language.self.python"
+                    ],
+                    "variable": [
+                        "variable.other.readwrite.python",
+                        "variable.other.python"
+                    ],
+                    "parameter": [
+                        "variable.parameter.python"
+                    ],
+                    "property": [
+                        "variable.other.property.python"
                     ]
                 }
             }
@@ -38,7 +48,10 @@
                     "variable.readonly:python": "#4EC9B0",
                     "parameter.selfParameter:python": "#569CD6",
                     "decorator:python": "#DCDCAA",
-                    "typeParameter:python": "#4FC1FF"
+                    "typeParameter:python": "#4FC1FF",
+                    "variable:python": "#9CDCFE",
+                    "parameter:python": "#9CDCFE",
+                    "property:python": "#9CDCFE"
                 }
             }
         },
