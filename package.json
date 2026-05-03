@@ -2,7 +2,7 @@
     "name": "light-pyrefly",
     "displayName": "Light Pyrefly — Python Semantic Highlighting",
     "description": "Lightweight Python semantic highlighting. No type checker, no LSP server — just beautiful, context-aware syntax coloring.",
-    "version": "1.0.3",
+    "version": "1.0.4",
     "icon": "icon.png",
     "publisher": "mustapha",
     "repository": "https://github.com/local/local",
