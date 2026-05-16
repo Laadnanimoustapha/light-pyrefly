@@ -58,6 +58,13 @@ const RE_EXCEPT        = /^(\s*)except\s+.*\bas\s+([A-Za-z_]\w*)/;
 const RE_RETURN_ARROW  = /->\s*([A-Za-z_][\w\[\], |.]*)\s*:/;
 const RE_IDENTIFIER    = /[A-Za-z_]\w*/g;
 const RE_ALL_CAPS      = /^[A-Z][A-Z0-9_]+$/;
+const RE_LAMBDA        = /\blambda\s+([^:]+):/g;
+const RE_COMPREHENSION = /\b(?:for)\s+([^in]+)\s+in\s+/g;
+const RE_MAGIC_METHOD  = /^__[a-z_]+__$/;
+// Improved string literal patterns
+const RE_TRIPLE_STRING = /"""[\s\S]*?"""|'''[\s\S]*?'''/g;
+const RE_FSTRING       = /f["']|f"""|f'''/gi;
+const RE_STRING        = /(?:r|b|u|rb|br|f)?["'](?:\\.|[^"'\\])*["']|(?:r|b|u|rb|br|f)?"""[\s\S]*?"""|(?:r|b|u|rb|br|f)?'''[\s\S]*?'''/gi;
 
 // ── Scope tracker ──────────────────────────────────────────────────
 interface Scope {
@@ -310,6 +317,55 @@ export class PythonSemanticTokensProvider
             this.highlightTypeRefs(line, lineIdx, nameOff + name.length, builder, importedNames, definedNames);
         }
 
+        // ── Lambda parameters ──────────────────────────────────────
+        RE_LAMBDA.lastIndex = 0;
+        let lambdaMatch: RegExpExecArray | null;
+        while ((lambdaMatch = RE_LAMBDA.exec(line))) {
+            const paramsStr = lambdaMatch[1].trim();
+            const lambdaStart = lambdaMatch.index + 7; // "lambda ".length
+            const params = paramsStr.split(',');
+            let searchFrom = lambdaStart;
+            
+            for (const param of params) {
+                const trimmed = param.trim();
+                if (!trimmed) continue;
+                // Handle default values: param=value
+                const eqIdx = trimmed.indexOf('=');
+                const paramName = eqIdx >= 0 ? trimmed.substring(0, eqIdx).trim() : trimmed;
+                // Strip * or **
+                const cleanName = paramName.replace(/^\*{1,2}/, '');
+                if (!cleanName) continue;
+                
+                const paramOff = line.indexOf(cleanName, searchFrom);
+                if (paramOff >= 0 && paramOff < lambdaMatch.index + lambdaMatch[0].length) {
+                    builder.push(lineIdx, paramOff, cleanName.length, idx("parameter"), 0);
+                    searchFrom = paramOff + cleanName.length;
+                }
+            }
+        }
+
+        // ── Comprehension variables ────────────────────────────────
+        RE_COMPREHENSION.lastIndex = 0;
+        let compMatch: RegExpExecArray | null;
+        while ((compMatch = RE_COMPREHENSION.exec(line))) {
+            const varsStr = compMatch[1].trim();
+            const forStart = compMatch.index;
+            // Handle tuple unpacking: for x, y in ...
+            const varNames = varsStr.split(',');
+            let searchFrom = forStart + 4; // "for ".length
+            
+            for (const varName of varNames) {
+                const trimmed = varName.trim();
+                if (!trimmed) continue;
+                
+                const varOff = line.indexOf(trimmed, searchFrom);
+                if (varOff >= 0 && varOff < forStart + compMatch[0].length) {
+                    builder.push(lineIdx, varOff, trimmed.length, idx("variable"), 0);
+                    searchFrom = varOff + trimmed.length;
+                }
+            }
+        }
+
         // ── Identifier usages in remaining expressions ─────────────
         this.highlightUsages(line, lineIdx, builder, importedNames, definedNames, inClass);
     }
@@ -408,33 +464,28 @@ export class PythonSemanticTokensProvider
             "class", "continue", "def", "del", "elif", "else", "except", "finally", 
             "for", "from", "global", "if", "import", "in", "is", "lambda", "nonlocal", 
             "not", "or", "pass", "raise", "return", "try", "while", "with", "yield",
-            "match", "case", "type"
+            "match", "case", "type"  // Python 3.10+ pattern matching and 3.12+ type aliases
         ]);
 
         // Find string boundaries to avoid highlighting words inside strings, and highlight inline comments
         const stringRanges: [number, number][] = [];
-        let inString = false;
-        let stringChar = '';
-        for (let i = 0; i < line.length; i++) {
-            if (!inString) {
-                if (line[i] === '"' || line[i] === "'") {
-                    inString = true;
-                    stringChar = line[i];
-                    stringRanges.push([i, -1]);
-                } else if (line[i] === '#') {
-                    stringRanges.push([i, line.length]);
-                    tokensToPush.push({ char: i, length: line.length - i, type: idx("comment"), mod: 0 });
-                    break;
-                }
-            } else {
-                if (line[i] === '\\') { i++; continue; }
-                if (line[i] === stringChar) {
-                    inString = false;
-                    stringRanges[stringRanges.length - 1][1] = i;
-                }
+        
+        // Improved string detection: handle all Python string types
+        RE_STRING.lastIndex = 0;
+        let strMatch: RegExpExecArray | null;
+        while ((strMatch = RE_STRING.exec(line))) {
+            stringRanges.push([strMatch.index, strMatch.index + strMatch[0].length - 1]);
+        }
+        
+        // Find comments (not inside strings)
+        const commentIdx = line.indexOf('#');
+        if (commentIdx >= 0) {
+            const inStr = stringRanges.some(([s, e]) => commentIdx >= s && commentIdx <= e);
+            if (!inStr) {
+                stringRanges.push([commentIdx, line.length]);
+                tokensToPush.push({ char: commentIdx, length: line.length - commentIdx, type: idx("comment"), mod: 0 });
             }
         }
-        if (inString) stringRanges[stringRanges.length - 1][1] = line.length;
 
         while ((m = idRe.exec(line))) {
             const name = m[1];
@@ -449,10 +500,13 @@ export class PythonSemanticTokensProvider
             const afterWord = line.substring(off + name.length).trimStart();
             const isCall = afterWord.startsWith("(");
             const isKwarg = afterWord.startsWith("=");
+            const isMagicMethod = RE_MAGIC_METHOD.test(name);
 
             if (isAttr) {
                 if (isCall) {
-                    tokensToPush.push({ char: off, length: name.length, type: idx("method"), mod: 0 });
+                    // Highlight magic methods with special modifier
+                    const modBits = isMagicMethod ? mod("defaultLibrary") : 0;
+                    tokensToPush.push({ char: off, length: name.length, type: idx("method"), mod: modBits });
                 } else if (RE_ALL_CAPS.test(name)) {
                     tokensToPush.push({ char: off, length: name.length, type: idx("enumMember"), mod: 0 });
                 } else {
@@ -467,7 +521,8 @@ export class PythonSemanticTokensProvider
                     tokensToPush.push({ char: off, length: name.length, type: idx("class"), mod: 0 });
                 } else if (definedNames.has(name)) {
                     const t = definedNames.get(name)!;
-                    tokensToPush.push({ char: off, length: name.length, type: idx(t === "constant" ? "function" : t), mod: 0 });
+                    const modBits = (t === "method" && isMagicMethod) ? mod("defaultLibrary") : 0;
+                    tokensToPush.push({ char: off, length: name.length, type: idx(t === "constant" ? "function" : t), mod: modBits });
                 } else if (importedNames.has(name)) {
                     tokensToPush.push({ char: off, length: name.length, type: idx(importedNames.get(name)!), mod: 0 });
                 } else {
