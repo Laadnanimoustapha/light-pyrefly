@@ -44,7 +44,6 @@ const TYPING_NAMES = new Set([
 ]);
 
 // ── Regex patterns ─────────────────────────────────────────────────
-const RE_COMMENT       = /^(\s*)#(.*)$/;
 const RE_CLASS_DEF     = /^(\s*)class\s+([A-Za-z_]\w*)/;
 const RE_FUNC_DEF      = /^(\s*)(async\s+)?def\s+([A-Za-z_]\w*)\s*(?:\[([^\]]*)\])?\s*\(([^)]*)\)/;
 const RE_DECORATOR     = /^(\s*)@([A-Za-z_][\w.]*)/;
@@ -53,7 +52,6 @@ const RE_IMPORT        = /^(\s*)import\s+(.+)$/;
 const RE_ASSIGN        = /^(\s*)([A-Za-z_]\w*)\s*(?::\s*([^=]+?))?\s*=(?!=)/;
 const RE_ANN_ONLY      = /^(\s*)([A-Za-z_]\w*)\s*:\s*(.+)$/;
 const RE_FOR           = /^(\s*)(?:async\s+)?for\s+(.+?)\s+in\s+/;
-const RE_WITH          = /^(\s*)(?:async\s+)?with\s+(.+):\s*$/;
 const RE_EXCEPT        = /^(\s*)except\s+.*\bas\s+([A-Za-z_]\w*)/;
 const RE_RETURN_ARROW  = /->\s*([A-Za-z_][\w\[\], |.]*)\s*:/;
 const RE_IDENTIFIER    = /[A-Za-z_]\w*/g;
@@ -61,9 +59,7 @@ const RE_ALL_CAPS      = /^[A-Z][A-Z0-9_]+$/;
 const RE_LAMBDA        = /\blambda\s+([^:]+):/g;
 const RE_COMPREHENSION = /\b(?:for)\s+([^in]+)\s+in\s+/g;
 const RE_MAGIC_METHOD  = /^__[a-z_]+__$/;
-// Improved string literal patterns
-const RE_TRIPLE_STRING = /"""[\s\S]*?"""|'''[\s\S]*?'''/g;
-const RE_FSTRING       = /f["']|f"""|f'''/gi;
+// Single-line string detection (multi-line handled separately)
 const RE_STRING        = /(?:r|b|u|rb|br|f)?["'](?:\\.|[^"'\\])*["']|(?:r|b|u|rb|br|f)?"""[\s\S]*?"""|(?:r|b|u|rb|br|f)?'''[\s\S]*?'''/gi;
 
 // ── Scope tracker ──────────────────────────────────────────────────
@@ -90,6 +86,9 @@ export class PythonSemanticTokensProvider
         const importedNames = new Map<string, string>(); // name → tokenType
         const definedNames  = new Map<string, string>(); // name → tokenType
 
+        // Pre-pass: detect multi-line strings across the entire document
+        const multiLineStringRanges = this.detectMultiLineStrings(document);
+
         // Pass 1: collect definitions & imports so pass-2 can colour usages
         for (let i = 0; i < document.lineCount; i++) {
             const line = document.lineAt(i).text;
@@ -109,7 +108,7 @@ export class PythonSemanticTokensProvider
         // Pass 2: emit tokens
         for (let i = 0; i < document.lineCount; i++) {
             const line = document.lineAt(i).text;
-            this.tokenizeLine(line, i, fakeBuilder as any, scopes, importedNames, definedNames);
+            this.tokenizeLine(line, i, fakeBuilder as any, scopes, importedNames, definedNames, multiLineStringRanges);
         }
 
         // Sort tokens to avoid out-of-order pushing errors
@@ -132,6 +131,80 @@ export class PythonSemanticTokensProvider
         }
 
         return builder.build();
+    }
+
+    // ── Detect multi-line strings across the document ─────────────
+    private detectMultiLineStrings(document: vscode.TextDocument): Map<number, [number, number][]> {
+        const ranges = new Map<number, [number, number][]>(); // lineIdx → [(start, end), ...]
+        let inTripleString = false;
+        let tripleQuote = '';
+        let stringStartLine = -1;
+        let stringStartChar = -1;
+
+        for (let i = 0; i < document.lineCount; i++) {
+            const line = document.lineAt(i).text;
+            
+            if (!ranges.has(i)) {
+                ranges.set(i, []);
+            }
+
+            let j = 0;
+            while (j < line.length) {
+                if (!inTripleString) {
+                    // Check for triple quote start
+                    if (j + 2 < line.length) {
+                        const triple = line.substring(j, j + 3);
+                        if (triple === '"""' || triple === "'''") {
+                            // Check for string prefix (r, f, b, etc.)
+                            let prefixStart = j - 1;
+                            while (prefixStart >= 0 && /[rfbRFBuU]/.test(line[prefixStart])) {
+                                prefixStart--;
+                            }
+                            prefixStart++;
+
+                            inTripleString = true;
+                            tripleQuote = triple;
+                            stringStartLine = i;
+                            stringStartChar = prefixStart;
+                            j += 3;
+                            continue;
+                        }
+                    }
+                    j++;
+                } else {
+                    // Look for triple quote end
+                    if (j + 2 < line.length && line.substring(j, j + 3) === tripleQuote) {
+                        // Mark all lines from start to end
+                        if (stringStartLine === i) {
+                            // Single line triple-quoted string
+                            ranges.get(i)!.push([stringStartChar, j + 2]);
+                        } else {
+                            // Multi-line: mark start line from stringStartChar to end
+                            ranges.get(stringStartLine)!.push([stringStartChar, line.length]);
+                            // Mark middle lines entirely
+                            for (let k = stringStartLine + 1; k < i; k++) {
+                                ranges.get(k)!.push([0, document.lineAt(k).text.length]);
+                            }
+                            // Mark end line from 0 to j+2
+                            ranges.get(i)!.push([0, j + 2]);
+                        }
+                        inTripleString = false;
+                        j += 3;
+                        continue;
+                    }
+                    j++;
+                }
+            }
+
+            // If still in string at end of line, mark rest of line
+            if (inTripleString && stringStartLine === i) {
+                ranges.get(i)!.push([stringStartChar, line.length]);
+            } else if (inTripleString && stringStartLine < i) {
+                ranges.get(i)!.push([0, line.length]);
+            }
+        }
+
+        return ranges;
     }
 
     // ── Pass 1: collect names ──────────────────────────────────────
@@ -187,7 +260,8 @@ export class PythonSemanticTokensProvider
     private tokenizeLine(
         line: string, lineIdx: number, builder: vscode.SemanticTokensBuilder,
         scopes: Scope[], importedNames: Map<string, string>,
-        definedNames: Map<string, string>
+        definedNames: Map<string, string>,
+        multiLineStringRanges: Map<number, [number, number][]>
     ) {
         const indent = line.search(/\S/);
         if (indent < 0) return;
@@ -367,7 +441,7 @@ export class PythonSemanticTokensProvider
         }
 
         // ── Identifier usages in remaining expressions ─────────────
-        this.highlightUsages(line, lineIdx, builder, importedNames, definedNames, inClass);
+        this.highlightUsages(line, lineIdx, builder, importedNames, definedNames, inClass, multiLineStringRanges);
     }
 
     // ── Highlight parameters in a function signature ───────────────
@@ -451,7 +525,8 @@ export class PythonSemanticTokensProvider
     private highlightUsages(
         line: string, lineIdx: number, builder: vscode.SemanticTokensBuilder,
         importedNames: Map<string, string>, definedNames: Map<string, string>,
-        _inClass: boolean
+        _inClass: boolean,
+        multiLineStringRanges: Map<number, [number, number][]>
     ) {
         // To avoid out-of-order pushing if builder doesn't sort, we collect tokens and sort them
         const tokensToPush: { char: number, length: number, type: number, mod: number }[] = [];
@@ -467,14 +542,27 @@ export class PythonSemanticTokensProvider
             "match", "case", "type"  // Python 3.10+ pattern matching and 3.12+ type aliases
         ]);
 
-        // Find string boundaries to avoid highlighting words inside strings, and highlight inline comments
+        // Combine multi-line string ranges with single-line string detection
         const stringRanges: [number, number][] = [];
         
-        // Improved string detection: handle all Python string types
+        // Add multi-line string ranges for this line
+        const multiLineRanges = multiLineStringRanges.get(lineIdx) || [];
+        stringRanges.push(...multiLineRanges);
+        
+        // Detect single-line strings (not already covered by multi-line detection)
         RE_STRING.lastIndex = 0;
         let strMatch: RegExpExecArray | null;
         while ((strMatch = RE_STRING.exec(line))) {
-            stringRanges.push([strMatch.index, strMatch.index + strMatch[0].length - 1]);
+            const start = strMatch.index;
+            const end = start + strMatch[0].length - 1;
+            
+            // Only add if not already covered by multi-line string
+            const overlaps = stringRanges.some(([s, e]) => 
+                (start >= s && start <= e) || (end >= s && end <= e)
+            );
+            if (!overlaps) {
+                stringRanges.push([start, end]);
+            }
         }
         
         // Find comments (not inside strings)
